@@ -465,6 +465,70 @@
             color: #667eea;
         }
 
+        /* Modal de cuenta regresiva */
+        .overlay-cuenta {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+
+        .overlay-cuenta.activo {
+            display: flex;
+        }
+
+        .contenido-cuenta {
+            background: #ffffff;
+            padding: 40px 60px;
+            border-radius: 20px;
+            text-align: center;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+            animation: aparecerCuenta 0.3s ease-out;
+        }
+
+        .contenido-cuenta h2 {
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .numero-cuenta {
+            font-size: 4rem;
+            font-weight: 800;
+            color: #667eea;
+            margin-top: 10px;
+            animation: zoomCuenta 1s ease-in-out infinite;
+        }
+
+        @keyframes aparecerCuenta {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes zoomCuenta {
+
+            0%,
+            100% {
+                transform: scale(1);
+            }
+
+            50% {
+                transform: scale(1.2);
+            }
+        }
+
         @media (max-width: 768px) {
             .cuadricula-respuestas {
                 grid-template-columns: 1fr;
@@ -545,6 +609,15 @@
         </div>
     </div>
 
+    <!-- Modal cuenta regresiva inicio -->
+    <div id="modalCuentaRegresiva" class="overlay-cuenta">
+        <div class="contenido-cuenta">
+            <h2>¡Prepárate!</h2>
+            <p>El quiz comienza en</p>
+            <div id="numeroCuentaRegresiva" class="numero-cuenta">3</div>
+        </div>
+    </div>
+
     <script>
         let preguntaActual = 0;
         let preguntas = [];
@@ -555,6 +628,8 @@
         let nombreUsuarioLogueado = null;
         let intervaloVerificacionSesion = null;
         let tiempoInicioPregunta = null;
+        let salidaNotificada = false;
+        let estaJugando = false;
 
         // ✅ NUEVO: Variables para sincronización con servidor
         let expiraTemporizadorQuiz = null; // Timestamp de expiración del quiz completo
@@ -714,6 +789,21 @@
 
         inicializarInterfazUsuario();
 
+        // Notificar salida también si el usuario cierra o cambia de página
+        window.addEventListener('beforeunload', (event) => {
+            // Solo notificar salida si el participante estaba jugando realmente
+            if (!idParticipante || salidaNotificada || !estaJugando) return;
+            salidaNotificada = true;
+            const urlSalir = `/api/participante/${idParticipante}/salir`;
+            try {
+                if (navigator.sendBeacon) {
+                    navigator.sendBeacon(urlSalir);
+                } else {
+                    fetch(urlSalir, { method: 'POST', keepalive: true }).catch(() => { });
+                }
+            } catch (_) { }
+        });
+
         if (!(inicioAutomatico === 'true' && idSesionURL && idParticipanteURL)) {
             document.getElementById('formularioUnirse').addEventListener('submit', async function (e) {
                 e.preventDefault();
@@ -760,10 +850,25 @@
                         }
 
                         await cargarPreguntas(datos.quiz.id);
-                        document.getElementById('pantallaUnirse').classList.remove('activa');
-                        document.getElementById('pantallaJuego').classList.add('activa');
-                        mostrarPregunta(0);
-                        iniciarVerificacionSesion();
+
+                        // Si no hay preguntas, no iniciar el juego ni mostrar "Juego Terminado"
+                        if (!preguntas || preguntas.length === 0) {
+                            mostrarAlerta('Este quiz no tiene preguntas o no se pudieron cargar. Consulta con tu profesor.');
+                            return;
+                        }
+
+                        const pantallaUnirse = document.getElementById('pantallaUnirse');
+                        if (pantallaUnirse) {
+                            pantallaUnirse.style.display = 'none';
+                            pantallaUnirse.classList.remove('activa');
+                        }
+
+                        // Mostrar cuenta regresiva antes de iniciar el juego (modo individual)
+                        iniciarCuentaRegresiva(() => {
+                            document.getElementById('pantallaJuego').classList.add('activa');
+                            mostrarPregunta(0);
+                            iniciarVerificacionSesion();
+                        });
                     } else {
                         mostrarAlerta(datos.error || 'Error al unirse al juego');
                     }
@@ -825,6 +930,9 @@
                 return mostrarResultados();
             }
 
+            // Marcar que el participante ya está dentro del juego
+            estaJugando = true;
+
             preguntaActual = indice;
             const pregunta = preguntas[indice];
 
@@ -850,8 +958,10 @@
                 }
             } catch (e) {
                 console.error(e);
-                alert('No se pudo sincronizar el tiempo de esta pregunta.');
-                return mostrarResultados();
+                alert('No se pudo sincronizar el tiempo de esta pregunta. Se utilizará el tiempo local de la pregunta.');
+                // Fallback: usar solo tiempo_limite local como expiración T2
+                const tiempoLimiteLocal = parseInt(pregunta?.tiempo_limite) || 30;
+                expiraT2 = Date.now() + tiempoLimiteLocal * 1000;
             }
 
             // 2) Pintar en la UI
@@ -1000,7 +1110,7 @@
             console.log("Tiempo utilizado:", tiempoUtilizado.toFixed(3), "seg");
             const puntos = esCorrecta ? Math.max(100, 1000 - (tiempoUtilizado * 10)) : 0;
             console.log("Puntos calculados:", puntos);
-            
+
             // Mostrar feedback visual
             const botones = document.querySelectorAll('.btn-respuesta');
             botones.forEach((boton, i) => {
@@ -1016,7 +1126,7 @@
             let guardadoOK = false;
 
             try {
-                const resp = await fetch('/api/guardar_respuesta', {                 
+                const resp = await fetch('/api/guardar_respuesta', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1025,9 +1135,8 @@
                         id_opcion: idOpcion,
                         tiempo_respuesta: tiempoUtilizado,
                         puntos_ganados: puntos
-                    }) 
-                    
-                    
+                    })
+
                 });
                 console.log("📤 Enviando al backend:", {
                     id_participante: idParticipante,
@@ -1067,10 +1176,7 @@
             setTimeout(() => {
                 mostrarPregunta(preguntaActual + 1);
             }, 2000);
-
-            
         }
-
 
 
         async function mostrarResultados() {
@@ -1128,26 +1234,43 @@
                     btnRepetir.style.marginTop = '12px';
                     btnRepetir.addEventListener('click', async function () {
                         try {
-                            const respuestaConsumir = await fetch(`/api/sesion/${idSesion}/consumir_intento`, { method: 'POST' });
+                            const respuestaConsumir = await fetch(`/api/sesion/${idSesion}/consumir_intento`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ id_participante: idParticipante })
+                            });
                             const datosConsumir = await respuestaConsumir.json();
                             if (respuestaConsumir.ok) {
                                 alert(`Intento consumido. Intentos restantes: ${datosConsumir.intentos_restantes}`);
                                 iniciarQuizDesdeCero(idQuiz);
                             } else {
-                                alert('❌ ' + (datosConsumir.error || 'No se pudo consumir el intento'));
+                                alert('⚠ ' + (datosConsumir.error || 'No se pudo consumir el intento'));
                             }
                         } catch (error) {
                             alert('Error de conexión al consumir intento');
                         }
                     });
-                    encabezadoResultados.appendChild(btnRepetir);
+                    if (encabezadoResultados) {
+                        encabezadoResultados.appendChild(btnRepetir);
+                    }
+
+
                 } else {
                     const btnSalir = document.createElement('button');
                     btnSalir.className = 'btn';
                     btnSalir.id = 'btnSalir';
                     btnSalir.textContent = 'Salir';
                     btnSalir.style.marginTop = '12px';
-                    btnSalir.addEventListener('click', function () {
+                    btnSalir.addEventListener('click', async function () {
+                        try {
+                            if (idParticipante) {
+                                await fetch(`/api/participante/${idParticipante}/salir`, {
+                                    method: 'POST'
+                                });
+                            }
+                        } catch (e) {
+                            console.error('Error al salir de la sesión:', e);
+                        }
                         window.location.href = '/jugar';
                     });
                     encabezadoResultados.appendChild(btnSalir);
@@ -1226,6 +1349,31 @@
                 mostrarPregunta(preguntaActual + 1);
             }
         });
+
+        // Cuenta regresiva visual antes de mostrar la primera pregunta
+        function iniciarCuentaRegresiva(callback) {
+            const modal = document.getElementById('modalCuentaRegresiva');
+            const numeroEl = document.getElementById('numeroCuentaRegresiva');
+            if (!modal || !numeroEl) {
+                if (typeof callback === 'function') callback();
+                return;
+            }
+
+            let contador = 3;
+            numeroEl.textContent = contador;
+            modal.classList.add('activo');
+
+            const intervalo = setInterval(() => {
+                contador -= 1;
+                if (contador > 0) {
+                    numeroEl.textContent = contador;
+                } else {
+                    clearInterval(intervalo);
+                    modal.classList.remove('activo');
+                    if (typeof callback === 'function') callback();
+                }
+            }, 1000);
+        }
 
 
     </script>

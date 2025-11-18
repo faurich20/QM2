@@ -16,6 +16,11 @@ app = Flask(__name__)
 
 app.secret_key = secrets.token_hex(32)
 
+# Configuración de cookies encriptadas para usuario
+COOKIE_USER_ID = 'usuId_enc'
+COOKIE_USER_NAME = 'usuNombre_enc'
+COOKIE_MAX_AGE = 60 * 60 * 8  # 8 horas
+
 # Configuración de correo 
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
@@ -95,18 +100,35 @@ def enviar_correo_recuperacion(correo, token):
         print(f"Error enviando correo: {e}")
         return False
 
+
+
 def requiere_sesion(f):
     @wraps(f)
     def funcion_decorada(*args, **kwargs):
         if 'id_usuario' not in session:
-            return redirect(url_for('iniciar_sesion'))
+            # Intentar reconstruir la sesión desde cookies encriptadas
+            usuario = usuario_desde_cookies()
+            if usuario:
+                session['id_usuario'] = usuario['id']
+                session['nombre_usuario'] = usuario['nombre_usuario']
+            else:
+                return redirect(url_for('iniciar_sesion'))
         return f(*args, **kwargs)
     return funcion_decorada
 
 def requiere_docente(f):
     @wraps(f)
     def funcion_decorada(*args, **kwargs):
-        if 'id_usuario' not in session or not session.get('es_profesor'):
+        if 'id_usuario' not in session:
+            # Intentar reconstruir la sesión desde cookies encriptadas
+            usuario = usuario_desde_cookies()
+            if usuario:
+                session['id_usuario'] = usuario['id']
+                session['nombre_usuario'] = usuario['nombre_usuario']
+            else:
+                return jsonify({'error': 'Acceso denegado'}), 403
+
+        if not session.get('es_profesor'):
             return jsonify({'error': 'Acceso denegado'}), 403
         return f(*args, **kwargs)
     return funcion_decorada
@@ -147,14 +169,14 @@ def registrar():
         valido, mensaje = validar_contrasena(contrasena)
         if not valido:
             return jsonify({'error': mensaje}), 400
-        
+        #Se calcula el hash:
         hash_contrasena = hashlib.sha256(contrasena.encode()).hexdigest()
         codigo = generar_codigo_verificacion()
         expira = datetime.now() + timedelta(minutes=15)
         
         conexion = obtener_bd()
         cursor = conexion.cursor()
-        
+        #registra el hash en la bd
         try:
             cursor.execute('''
                 INSERT INTO usuarios (nombre_usuario, correo, contrasena, es_profesor, 
@@ -196,7 +218,7 @@ def api_registrar():
     valido, mensaje = validar_contrasena(contrasena)
     if not valido:
         return jsonify({'error': mensaje}), 400
-    
+    #hash de la contraseña
     hash_contrasena = hashlib.sha256(contrasena.encode()).hexdigest()
     codigo = generar_codigo_verificacion()
     expira = datetime.now() + timedelta(minutes=15)
@@ -289,6 +311,7 @@ def iniciar_sesion():
         if not nombre_usuario or not contrasena:
             return jsonify({'error': 'Usuario y contraseña son requeridos'}), 400
         
+        #hash de la contraseña
         hash_contrasena = hashlib.sha256(contrasena.encode()).hexdigest()
         
         conexion = obtener_bd()
@@ -310,10 +333,12 @@ def iniciar_sesion():
             session['nombre_usuario'] = usuario['nombre_usuario']
             session['es_profesor'] = usuario['es_profesor']
             
-            return jsonify({
+            respuesta = jsonify({
                 'exito': True,
                 'es_profesor': usuario['es_profesor']
             })
+            _set_user_cookies(respuesta, usuario['id'], usuario['nombre_usuario'])
+            return respuesta
         else:
             return jsonify({'error': 'Credenciales inválidas'}), 401
     
@@ -346,7 +371,9 @@ def api_iniciar_sesion():
         session['id_usuario'] = usuario['id']
         session['nombre_usuario'] = usuario['nombre_usuario']
         session['es_profesor'] = usuario['es_profesor']
-        return jsonify({'exito': True, 'es_profesor': usuario['es_profesor']})
+        respuesta = jsonify({'exito': True, 'es_profesor': usuario['es_profesor']})
+        _set_user_cookies(respuesta, usuario['id'], usuario['nombre_usuario'])
+        return respuesta
     else:
         return jsonify({'error': 'Credenciales inválidas'}), 401
 
@@ -390,7 +417,7 @@ def restablecer_contrasena(token):
         valido, mensaje = validar_contrasena(nueva_contrasena)
         if not valido:
             return jsonify({'error': mensaje}), 400
-        
+        #hash de la contraseña para recuperar
         hash_contrasena = hashlib.sha256(nueva_contrasena.encode()).hexdigest()
         
         conexion = obtener_bd()
@@ -426,12 +453,39 @@ def unirse_juego():
     ''', (codigo_pin,))
     
     quiz = cursor.fetchone()
+    modo_quiz = (quiz.get('modo') if quiz else 'individual').lower()
+    print(f"[UNIRSE_JUEGO] PIN={codigo_pin}, nombre={nombre_usuario}, modo={modo_quiz}, quiz_id={quiz['id'] if quiz else None}")
     
     if not quiz:
         conexion.close()
         return jsonify({'error': 'PIN inválido'}), 404
     
     # Crear o unirse a sesión
+    if modo_quiz == 'individual':
+        cursor.execute('''
+            INSERT INTO sesiones_juego (quiz_id, codigo_pin)
+            VALUES (%s, %s)
+        ''', (quiz['id'], codigo_pin))
+        id_sesion = cursor.lastrowid
+
+        cursor.execute('''
+            INSERT INTO participantes (sesion_id, nombre_usuario)
+            VALUES (%s, %s)
+        ''', (id_sesion, nombre_usuario))
+        id_participante = cursor.lastrowid
+
+        print(f"[UNIRSE_JUEGO] individual -> sesion_id={id_sesion}, participante_id={id_participante}")
+
+        conexion.commit()
+        conexion.close()
+
+        return jsonify({
+            'exito': True,
+            'id_sesion': id_sesion,
+            'id_participante': id_participante,
+            'quiz': quiz
+        })
+
     cursor.execute('''
         SELECT * FROM sesiones_juego 
         WHERE quiz_id = %s AND esta_activa = 1
@@ -464,6 +518,8 @@ def unirse_juego():
             VALUES (%s, %s)
         ''', (id_sesion, nombre_usuario))
         id_participante = cursor.lastrowid
+
+    print(f"[UNIRSE_JUEGO] grupal -> sesion_id={id_sesion}, participante_id={id_participante}")
     
     conexion.commit()
     conexion.close()
@@ -485,12 +541,13 @@ def abrir_pregunta(id_pregunta):
     datos = request.get_json() or {}
     id_participante = int(datos.get('id_participante'))
     id_sesion = int(datos.get('id_sesion'))
+    id_preg = id_pregunta
 
     conexion = obtener_bd()
     cursor = conexion.cursor(pymysql.cursors.DictCursor)
     try:
         # Traer tiempo_limite de la pregunta y expira_temporizador global de la sesión
-        cursor.execute("SELECT tiempo_limite FROM preguntas WHERE id=%s", (id_pregunta,))
+        cursor.execute("SELECT tiempo_limite FROM preguntas WHERE id=%s", (id_preg,))
         preg = cursor.fetchone()
         if not preg:
             return jsonify({'error': 'Pregunta no encontrada'}), 404
@@ -513,7 +570,7 @@ def abrir_pregunta(id_pregunta):
             SELECT * FROM participante_pregunta_tiempos
             WHERE sesion_id=%s AND participante_id=%s AND pregunta_id=%s
             LIMIT 1
-        """, (id_sesion, id_participante, id_pregunta))
+        """, (id_sesion, id_participante, id_preg))
         row = cursor.fetchone()
 
         if row:
@@ -545,7 +602,7 @@ def abrir_pregunta(id_pregunta):
                 INSERT INTO participante_pregunta_tiempos
                 (sesion_id, participante_id, pregunta_id, abierto_en, expira_en)
                 VALUES (%s, %s, %s, %s, %s)
-            """, (id_sesion, id_participante, id_pregunta, abierto_en, expira_en))
+            """, (id_sesion, id_participante, id_preg, abierto_en, expira_en))
             conexion.commit()
 
         return jsonify({
@@ -554,6 +611,7 @@ def abrir_pregunta(id_pregunta):
         })
     except Exception as e:
         conexion.rollback()
+        print(f"[ABRIR_PREGUNTA] Error al abrir pregunta {id_pregunta} para participante {id_participante}, sesion {id_sesion}: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conexion.close()
@@ -945,6 +1003,14 @@ def consumir_intento(id_sesion):
     conexion = obtener_bd()
     cursor = conexion.cursor(pymysql.cursors.DictCursor)
     try:
+        # Leer opcionalmente el participante para reiniciar su progreso
+        datos = {}
+        try:
+            datos = request.get_json() or {}
+        except Exception:
+            datos = {}
+        id_participante = datos.get('id_participante')
+
         # Obtener intentos_restantes actual
         cursor.execute('SELECT intentos_restantes FROM sesiones_juego WHERE id = %s FOR UPDATE', (id_sesion,))
         fila = cursor.fetchone()
@@ -960,6 +1026,35 @@ def consumir_intento(id_sesion):
         # Decrementar en 1
         nuevos_restantes = restantes - 1
         cursor.execute('UPDATE sesiones_juego SET intentos_restantes = %s WHERE id = %s', (nuevos_restantes, id_sesion))
+
+        # Si se indica un participante, reiniciar su progreso para un nuevo intento
+        if id_participante:
+            try:
+                id_participante_int = int(id_participante)
+            except Exception:
+                id_participante_int = None
+
+            if id_participante_int:
+                # Borrar respuestas anteriores de este participante
+                cursor.execute('DELETE FROM respuestas WHERE id_participante = %s', (id_participante_int,))
+                # Borrar tiempos T2 de preguntas de este participante en esta sesión
+                cursor.execute(
+                    '''
+                    DELETE FROM participante_pregunta_tiempos
+                    WHERE sesion_id = %s AND participante_id = %s
+                    ''',
+                    (id_sesion, id_participante_int)
+                )
+                # Reiniciar puntuación acumulada
+                cursor.execute(
+                    '''
+                    UPDATE participantes
+                    SET puntuacion_total = 0
+                    WHERE id = %s AND sesion_id = %s
+                    ''',
+                    (id_participante_int, id_sesion)
+                )
+
         conexion.commit()
         conexion.close()
         return jsonify({'exito': True, 'intentos_restantes': nuevos_restantes})
@@ -1105,6 +1200,28 @@ def sesiones_activas():
         ''', (session['id_usuario'],))
         
         sesiones = cursor.fetchall()
+
+        # Normalizar campos datetime a cadenas ISO para evitar problemas de parseo en JS
+        for ses in sesiones:
+            try:
+                if ses.get('expira_temporizador'):
+                    valor = ses['expira_temporizador']
+                    ses['expira_temporizador'] = valor.isoformat() if hasattr(valor, 'isoformat') else str(valor)
+            except Exception:
+                ses['expira_temporizador'] = str(ses.get('expira_temporizador'))
+
+        # Log compacto: solo ids y estado para evitar ruido excesivo
+        resumen = [
+            {
+                'sesion_id': s.get('sesion_id'),
+                'codigo_pin': s.get('codigo_pin'),
+                'estado': s.get('estado'),
+                'intentos_restantes': s.get('intentos_restantes'),
+                'participant_count': s.get('participant_count'),
+            }
+            for s in sesiones
+        ]
+        print(f"[SESIONES_ACTIVAS] profesor_id={session.get('id_usuario')}, sesiones_resumen={resumen}")
         return jsonify(sesiones)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1486,10 +1603,21 @@ def gestionar_pregunta(id_pregunta):
 def info_sesion_usuario():
     """Obtener información de la sesión actual (si existe)"""
     # No requiere sesión - retorna datos vacíos si no está logueado
+    id_usuario = session.get('id_usuario')
+    nombre_usuario = session.get('nombre_usuario')
+    es_profesor = session.get('es_profesor', False)
+
+    # Si no hay datos en sesión, intentar obtenerlos desde cookies encriptadas
+    if not id_usuario or not nombre_usuario:
+        usuario = usuario_desde_cookies()
+        if usuario:
+            id_usuario = usuario['id']
+            nombre_usuario = usuario['nombre_usuario']
+
     return jsonify({
-        'id_usuario': session.get('id_usuario'),
-        'nombre_usuario': session.get('nombre_usuario'),
-        'es_profesor': session.get('es_profesor', False)
+        'id_usuario': id_usuario,
+        'nombre_usuario': nombre_usuario,
+        'es_profesor': es_profesor if id_usuario else False
     })
 
 @app.route('/ver_sala_juego/<int:id_sesion>')
@@ -1502,7 +1630,9 @@ def ver_sala_juego(id_sesion):
 @app.route('/cerrar_sesion')
 def cerrar_sesion():
     session.clear()
-    return redirect(url_for('inicio'))
+    respuesta = redirect(url_for('inicio'))
+    _clear_user_cookies(respuesta)
+    return respuesta
 
 # Agregar este endpoint después del endpoint de exportar_resultados en app.py
 
@@ -1719,6 +1849,93 @@ def _listar_rutas():
     reglas = sorted([str(r) for r in app.url_map.iter_rules()])
     return jsonify({ 'rutas': reglas })
 
+# =============================
+# COOKIES: HASH + FIRMA SHA256
+# =============================
+
+def _hash(valor):
+    return hashlib.sha256(str(valor).encode('utf-8')).hexdigest()
+
+def _firmar(hash_valor):
+    secreto = str(app.secret_key)
+    return hashlib.sha256((hash_valor + secreto).encode('utf-8')).hexdigest()
+
+
+def _set_user_cookies(response, id_usuario, nombre_usuario):
+    """
+    Guarda cookies seguras sin exponer ID o nombre reales.
+    Formato:
+        hash(valor_real) : firma(hash)
+    """
+
+    secure = app.config.get('SESSION_COOKIE_SECURE', False)
+    samesite = app.config.get('SESSION_COOKIE_SAMESITE', 'Lax')
+
+    cookie_args = {
+        'max_age': COOKIE_MAX_AGE,
+        'httponly': True,
+        'secure': secure,
+        'samesite': samesite,
+    }
+
+    # Hash oculto
+    hash_id = _hash(id_usuario)
+    hash_nombre = _hash(nombre_usuario)
+
+    # Firma para evitar manipulación
+    firma_id = _firmar(hash_id)
+    firma_nombre = _firmar(hash_nombre)
+
+    # Guardar cookies
+    response.set_cookie(COOKIE_USER_ID, f"{hash_id}:{firma_id}", **cookie_args)
+    response.set_cookie(COOKIE_USER_NAME, f"{hash_nombre}:{firma_nombre}", **cookie_args)
+
+    return response
+
+
+def _clear_user_cookies(response):
+    response.delete_cookie(COOKIE_USER_ID)
+    response.delete_cookie(COOKIE_USER_NAME)
+    return response
+
+
+def usuario_desde_cookies():
+    """
+    Reconstruye usuario desde cookies sin exponer datos reales.
+    Retorna id_usuario y nombre_usuario reales.
+    """
+    raw_id = request.cookies.get(COOKIE_USER_ID)
+    raw_nom = request.cookies.get(COOKIE_USER_NAME)
+
+    if not raw_id or not raw_nom:
+        return None
+
+    try:
+        hash_id, firma_id = raw_id.split(":", 1)
+        hash_nombre, firma_nombre = raw_nom.split(":", 1)
+    except ValueError:
+        return None
+
+    # Verificar firmas
+    if _firmar(hash_id) != firma_id or _firmar(hash_nombre) != firma_nombre:
+        return None
+
+    # Buscar usuario real por sus hashes
+    conexion = obtener_bd()
+    cursor = conexion.cursor(pymysql.cursors.DictCursor)
+    cursor.execute("""
+        SELECT id, nombre_usuario, es_profesor
+        FROM usuarios
+        WHERE SHA2(id, 256) = %s
+          AND SHA2(nombre_usuario, 256) = %s
+        LIMIT 1
+    """, (hash_id, hash_nombre))
+
+    usuario = cursor.fetchone()
+    conexion.close()
+
+    return usuario
+
+
 if __name__ == '__main__':
     app.run(debug=True)
-

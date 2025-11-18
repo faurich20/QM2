@@ -1012,6 +1012,47 @@
                 const sesiones = todasLasSesiones.filter(s => s.quiz_id == idQuiz);
                 
                 const contenedor = document.getElementById('contenedorSesionesActivas');
+
+                // Vista simplificada para modo INDIVIDUAL: una sola tarjeta sin botones de iniciar/finalizar
+                const esIndividual = sesiones.length > 0 && (sesiones[0].modo || 'individual').toLowerCase() === 'individual';
+                if (esIndividual) {
+                    // Tomar siempre la sesi�n m�s reciente (mayor id)
+                    const sesionReciente = sesiones.reduce((acc, s) => (!acc || s.sesion_id > acc.sesion_id) ? s : acc, null);
+                    const totalPart = sesionReciente ? (sesionReciente.participant_count || 0) : 0;
+                    const totalSpan = document.getElementById('totalparticipantes');
+                    if (totalSpan) {
+                        totalSpan.textContent = totalPart;
+                    }
+
+                    // Si ya no hay participantes en la �ltima sesi�n, no mostrar tarjeta
+                    if (totalPart <= 0) {
+                        contenedor.innerHTML = '';
+                        return;
+                    }
+
+                    // Si ya no hay participantes en la última sesión, no mostrar tarjeta
+                    if (totalPart <= 0) {
+                        contenedor.innerHTML = '';
+                        return;
+                    }
+
+                    contenedor.innerHTML = `
+                        <div class="tarjeta-sesion" data-sesion-id="${sesionReciente.sesion_id}">
+                            <div class="encabezado-sesion">
+                                <div class="titulo-sesion">${sesionReciente.titulo}</div>
+                            </div>
+                            <div class="info-sesion">
+                                <span>📌 PIN: <strong>${sesionReciente.codigo_pin}</strong></span>
+                                <span>👥 Participantes: <strong id="count-${sesionReciente.sesion_id}">${totalPart}</strong></span>
+                            </div>
+                            <div id="participantes-sesion-${sesionReciente.sesion_id}"></div>
+                        </div>
+                    `;
+
+                    // Mostrar lista de participantes conectados (última sesión creada)
+                    cargarParticipantesEnTiempoReal(sesionReciente.sesion_id);
+                    return;
+                }
                 
                 if (sesiones.length === 0) {
                     contenedor.innerHTML = `

@@ -1,4 +1,8 @@
-pip install Flask flask-mail
-pip install pymysql pyopenssl
-pip install pandas
-pip install openpyxl
+# cd home\ajrepremio4\mysite 
+# venv\Scripts\activate
+
+
+
+pip install Flask flask-mail pymysql pyopenssl pandas openpyxl
+
+
